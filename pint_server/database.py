@@ -18,6 +18,7 @@
 # NOTE(gyee):
 # see https://flask.palletsprojects.com/en/1.1.x/patterns/sqlalchemy/
 
+import enum
 import logging
 import os
 
@@ -27,18 +28,26 @@ from sqlalchemy.ext.declarative import declarative_base
 from pint_server.models import (
         AlibabaImagesModel,
         AmazonImagesModel,
-        AmazonServersModel,
+        AmazonRegionServersModel,
+        AmazonUpdateServersModel,
         Base,
         GoogleImagesModel,
-        GoogleServersModel,
+        GoogleRegionServersModel,
+        GoogleUpdateServersModel,
         ImageState,
         MicrosoftImagesModel,
         MicrosoftRegionMapModel,
-        MicrosoftServersModel,
+        MicrosoftRegionServersModel,
+        MicrosoftUpdateServersModel,
         OracleImagesModel,
-        ServerType,
         VersionsModel
     )
+
+
+class ServerType(enum.Enum):
+    region = 'region'
+    update = 'update'
+
 
 def get_environ_or_bust(key_name):
     assert key_name in os.environ, 'Environment variable %s is required.' % (

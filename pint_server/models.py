@@ -17,7 +17,7 @@
 
 import enum
 
-from sqlalchemy import Column, Date, Enum, Numeric, String
+from sqlalchemy import Column, Date, Enum, Integer, Numeric, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects import postgresql
 
@@ -38,13 +38,6 @@ class ImageState(enum.Enum):
         return str(self.value)
 
 
-class ServerType(enum.Enum):
-    __enum_name__ = 'server_type'
-
-    region = 'region'
-    update = 'update'
-
-
 class PintBase(object):
     @property
     def tablename(self):
@@ -59,73 +52,91 @@ class PintBase(object):
 
 
 class ProviderImageBase(PintBase):
-    name = Column(String(255), primary_key=True)
-    state = Column(Enum(ImageState, name=ImageState.__enum_name__))
+    state = Column(Enum(ImageState, name=ImageState.__enum_name__),
+                   nullable=False)
     replacementname = Column(String(255))
-    publishedon = Column(Date, primary_key=True)
+    publishedon = Column(Date, nullable=False)
     deprecatedon = Column(Date)
     deletedon = Column(Date)
     changeinfo = Column(String(255))
 
 
 class ProviderServerBase(PintBase):
-    type = Column(Enum(ServerType, name=ServerType.__enum_name__))
+    id = Column(Integer, primary_key=True, autoincrement=True)
     shape = Column(String(10))
-    name = Column(String(100))
     # NOTE(gyee): the INET type is specific to PostgreSQL. If in the future
     # we decided to support other vendors, we'll need to update this
     # column type accordingly.
-    ip = Column(postgresql.INET, primary_key=True)
-    region = Column(String(100), primary_key=True)
+    ip = Column(postgresql.INET)
+    region = Column(String(100), nullable=False)
     ipv6 = Column(postgresql.INET)
+
+
+class ProviderUpdateServerBase(ProviderServerBase):
+    name = Column(String(100), nullable=False)
 
 
 class AmazonImagesModel(Base, ProviderImageBase):
     __tablename__ = 'amazonimages'
 
+    name = Column(String(255), nullable=False)
     id = Column(String(100), primary_key=True)
     replacementid = Column(String(100))
-    region = Column(String(100), primary_key=True)
+    region = Column(String(100), nullable=False)
 
 
 class AlibabaImagesModel(Base, ProviderImageBase):
     __tablename__ = 'alibabaimages'
 
+    name = Column(String(255), nullable=False)
     id = Column(String(100), primary_key=True)
     replacementid = Column(String(100))
-    region = Column(String(100))
+    region = Column(String(100), nullable=False)
 
 
 class GoogleImagesModel(Base, ProviderImageBase):
     __tablename__ = 'googleimages'
 
-    project = Column(String(50))
+    name = Column(String(255), primary_key=True)
+    project = Column(String(50), nullable=False)
 
 
 class MicrosoftImagesModel(Base, ProviderImageBase):
     __tablename__ = 'microsoftimages'
 
-    environment = Column(String(50), primary_key=True)
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    environment = Column(String(50), nullable=False)
     urn = Column(String(100))
 
 
 class OracleImagesModel(Base, ProviderImageBase):
     __tablename__ = 'oracleimages'
 
+    name = Column(String(255), nullable=False)
     id = Column(String(100), primary_key=True)
     replacementid = Column(String(100))
 
 
-class AmazonServersModel(Base, ProviderServerBase):
-    __tablename__ = 'amazonservers'
+class AmazonRegionServersModel(Base, ProviderServerBase):
+    __tablename__ = 'amazonregionservers'
+
+class AmazonUpdateServersModel(Base, ProviderUpdateServerBase):
+    __tablename__ = 'amazonupdateservers'
 
 
-class GoogleServersModel(Base, ProviderServerBase):
-    __tablename__ = 'googleservers'
+class GoogleRegionServersModel(Base, ProviderServerBase):
+    __tablename__ = 'googleregionservers'
+
+class GoogleUpdateServersModel(Base, ProviderUpdateServerBase):
+    __tablename__ = 'googleupdateservers'
 
 
-class MicrosoftServersModel(Base, ProviderServerBase):
-    __tablename__ = 'microsoftservers'
+class MicrosoftRegionServersModel(Base, ProviderServerBase):
+    __tablename__ = 'microsoftregionservers'
+
+class MicrosoftUpdateServersModel(Base, ProviderUpdateServerBase):
+    __tablename__ = 'microsoftupdateservers'
 
 
 class MicrosoftRegionMapModel(Base, PintBase):

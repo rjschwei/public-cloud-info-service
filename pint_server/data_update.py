@@ -27,22 +27,32 @@ import re
 import subprocess
 import sys
 
-from pint_server.database import init_db
+from pint_server.database import init_db, ServerType
 from pint_server.models import (
             ImageState,
-            ServerType,
             AlibabaImagesModel,
             AmazonImagesModel,
-            AmazonServersModel,
+            AmazonRegionServersModel,
+            AmazonUpdateServersModel,
             GoogleImagesModel,
-            GoogleServersModel,
+            GoogleRegionServersModel,
+            GoogleUpdateServersModel,
             MicrosoftImagesModel,
             MicrosoftRegionMapModel,
-            MicrosoftServersModel,
+            MicrosoftRegionServersModel,
+            MicrosoftUpdateServersModel,
             OracleImagesModel,
             VersionsModel
         )
 
+class DataUpdateError(Exception):
+    pass
+
+class InvalidServerTypeErrror(DataUpdateError):
+    pass
+
+class MissingRequiredTablesErrror(DataUpdateError):
+    pass
 
 LOG = logging.getLogger(__name__)
 
@@ -166,7 +176,35 @@ def extract_data_from_file(data_file, data_store):
             table_name = table_type + "s"
             rows = extract_provider_data_rows(
                         root.findall(table_name)[0], table_type)
-            provider_tables[table_name] = rows
+            if table_type == 'image':
+                provider_tables[table_name] = rows
+            else:
+                # separate the servers into two lists by type
+                servers = {ServerType.region: [], ServerType.update: []}
+
+                for row in [dict(r) for r in rows]:
+                    # pop the server type out of the row entry as we no
+                    # longer store the type in a row, but rather use it
+                    # to select which servers table to add the row to.
+                    server_type = row.pop("type")
+
+                    # ensure server type is valid
+                    if not isinstance(server_type, ServerType):
+                        raise InvalidServerTypeError(
+                            "Invalid ServerType: '%s' in "
+                            "servers data for '%s'" %
+                            (server_type, provider))
+
+                    # region servers don't have names
+                    if server_type == ServerType.region:
+                        del(row['name'])
+
+                    # add the server row to the appropriate list
+                    servers[server_type].append(row)
+
+                # Add the servers tables to the set of providers tables
+                for _type, _list in servers.items():
+                    provider_tables[f"{_type.value}servers"] = _list
 
         if provider == 'microsoft':
             rows = extract_provider_region_map_rows(
@@ -182,6 +220,8 @@ def orm_update_table(db, provider, table_name, table_rows, version):
         need_version = False
     else:
         table_name_caps = table_name.capitalize()
+        if table_name.endswith('servers'):
+            table_name_caps = table_name_caps.replace('servers', 'Servers')
         need_version = True
 
     model = eval(f"{provider.capitalize()}{table_name_caps}Model")
@@ -194,11 +234,17 @@ def orm_update_table(db, provider, table_name, table_rows, version):
     rows_added = 0
     rows_updated = 0
     for row_data in table_rows:
-        primary_data = {k:v for k, v in row_data.items()
+        search_data = {k:v for k, v in row_data.items()
                             if getattr(model.__table__.columns,
                                        k).primary_key}
-        # if we find no match for the primary keys they add a new row
-        found_row = db.query(model).filter_by(**primary_data).one_or_none()
+
+        # If table is using a surrogate integer index as the primary key
+        # then just search for an exact match
+        if not search_data:
+            search_data = row_data
+
+        # if we find no match for the primary keys then add a new row
+        found_row = db.query(model).filter_by(**search_data).one_or_none()
         if not found_row:
             row = model(**row_data)
             LOG.debug("Adding new row %s", repr(row))
@@ -297,14 +343,15 @@ def orm_load_database(pint_data, db_logfile=None):
         version = provider_info['version']
         LOG.debug("%s: %s", provider.capitalize(), repr(tables.keys()))
 
-        required_table_names = ['servers', 'images']
+        required_table_names = ['regionservers', 'updateservers', 'images']
         if provider == "microsoft":
             required_table_names.append("regionmap")
 
         for table_name in required_table_names:
             if table_name not in tables:
-                LOG.fatal("No %s table data for provider %s",
-                             repr(table_name), repr(provider))
+                raise MissingRequiredTablesErrror(
+                        "No %s table data for provider %s" %
+                        (repr(table_name), repr(provider)))
 
         orm_update_tables(db, provider, tables, version)
 

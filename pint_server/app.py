@@ -29,13 +29,23 @@ from xml.dom import minidom
 import xml.etree.ElementTree as ET
 
 import pint_server
-from pint_server.database import init_db
-from pint_server.models import (ImageState, AmazonImagesModel,
-                                OracleImagesModel, AlibabaImagesModel,
-                                MicrosoftImagesModel, GoogleImagesModel,
-                                AmazonServersModel, MicrosoftServersModel,
-                                GoogleServersModel, ServerType,
-                                VersionsModel, MicrosoftRegionMapModel)
+from pint_server.database import init_db, ServerType
+from pint_server.models import (
+    AlibabaImagesModel,
+    AmazonImagesModel,
+    AmazonRegionServersModel,
+    AmazonUpdateServersModel,
+    GoogleImagesModel,
+    GoogleRegionServersModel,
+    GoogleUpdateServersModel,
+    ImageState,
+    MicrosoftImagesModel,
+    MicrosoftRegionMapModel,
+    MicrosoftRegionServersModel,
+    MicrosoftUpdateServersModel,
+    OracleImagesModel,
+    VersionsModel
+)
 
 
 app = Flask(__name__)
@@ -77,9 +87,12 @@ PROVIDER_IMAGES_MODEL_MAP = {
 }
 
 PROVIDER_SERVERS_MODEL_MAP = {
-    'amazon': AmazonServersModel,
-    'google': GoogleServersModel,
-    'microsoft': MicrosoftServersModel
+    'amazon': {ServerType.region: AmazonRegionServersModel,
+               ServerType.update: AmazonUpdateServersModel},
+    'google': {ServerType.region: GoogleRegionServersModel,
+               ServerType.update: GoogleUpdateServersModel},
+    'microsoft': {ServerType.region: MicrosoftRegionServersModel,
+                  ServerType.update: MicrosoftUpdateServersModel}
 }
 
 SUPPORTED_CATEGORIES = ['images', 'servers']
@@ -87,7 +100,8 @@ SUPPORTED_CATEGORIES = ['images', 'servers']
 
 def get_supported_providers():
     versions  = VersionsModel.query.with_entities(VersionsModel.tablename)
-    return list({re.sub('(servers|images)', '', v.tablename) for v in versions})
+    return list({re.sub('((region|update)servers|images)', '', v.tablename)
+                 for v in versions})
 
 
 def get_providers():
@@ -117,7 +131,7 @@ def json_to_xml(json_obj, collection_name, element_name):
 
 def get_formatted_dict(obj, extra_attrs=None, exclude_attrs=None):
     obj_dict = {}
-    for attr in obj.__dict__.keys():
+    for attr, value in obj.__dict__.items():
         # FIXME(gyee): the orignal Pint server does not return the "changeinfo"
         # or "urn" attribute if it's empty. So we'll need to do the same here.
         # IMHO, I consider that a bug in the original Pint server as we should
@@ -125,9 +139,32 @@ def get_formatted_dict(obj, extra_attrs=None, exclude_attrs=None):
         if attr.lower() in ['urn', 'changeinfo'] and not obj.__dict__[attr]:
             continue
 
-        # NOTE: the "shape" attribute will be processed together with "type"
-        # as it is internal only
+        # NOTE(fmccarthy): shape is an internal field which, combined with
+        # the internal server type, allows us to synthesize the type value
+        # to be returned.
         if attr.lower() == 'shape':
+            # update servers have a name, region servers don't
+            if obj.__dict__.get('name'):
+                server_type = ServerType.update
+            else:
+                server_type = ServerType.region
+
+            # construct a list of elements that will make up the type value
+            type_info = [REGIONSERVER_SMT_REVERSED_MAP[server_type.value]]
+            if value:
+                type_info.append(value)
+
+            # join the elements that make up the type value with '-' to
+            # set the returned type value
+            obj_dict['type'] = '-'.join(type_info)
+
+            # TODO(fmccarthy): Do we need this???
+            # to maintain backwards compatibility add an empty name entry
+            # for region servers
+            if server_type == ServerType.region:
+                obj_dict['name'] = ""
+
+            # We don't want to include shape in the response
             continue
 
         if exclude_attrs and attr in exclude_attrs:
@@ -135,21 +172,10 @@ def get_formatted_dict(obj, extra_attrs=None, exclude_attrs=None):
         elif attr[0] == '_':
             continue
         else:
-            value = obj.__dict__[attr]
             if isinstance(value, Decimal):
                 obj_dict[attr] = float(value)
             elif isinstance(value, ImageState):
                 obj_dict[attr] = obj.state.value
-            elif isinstance(value, ServerType):
-                # NOTE(gyee): we need to reverse map the server type
-                # to make it backward compatible
-                if obj.__dict__['shape']:
-                    obj_dict[attr] = "%s-%s" % (
-                        REGIONSERVER_SMT_REVERSED_MAP[obj.type.value],
-                        obj.__dict__['shape'])
-                else:
-                     obj_dict[attr] = (
-                         REGIONSERVER_SMT_REVERSED_MAP[obj.type.value])
             elif isinstance(value, datetime.date):
                 obj_dict[attr] = value.strftime('%Y%m%d')
             else:
@@ -168,7 +194,10 @@ def get_mapped_server_type_for_provider(provider, server_type):
         server_types = [t['name'] for t in server_types_json]
         if mapped_server_type not in server_types:
             abort(Response('', status=404))
-    return mapped_server_type
+
+    # Used to dereference PROVIDER_SERVERS_MODEL_MAP provider
+    # entries which are dictionaries keyed by ServerType.
+    return ServerType(mapped_server_type)
 
 
 def get_provider_servers_for_type(provider, server_type):
@@ -178,20 +207,20 @@ def get_provider_servers_for_type(provider, server_type):
     # NOTE(gyee): currently we don't have DB tables for both Alibaba and
     # Oracle servers. In order to maintain compatibility with the
     # existing Pint server, we are returning an empty list.
-    if not PROVIDER_SERVERS_MODEL_MAP.get(provider):
+    model = PROVIDER_SERVERS_MODEL_MAP.get(provider,
+                                           {}).get(mapped_server_type)
+    if not model:
         return servers
 
-    servers = PROVIDER_SERVERS_MODEL_MAP[provider].query.filter(
-        PROVIDER_SERVERS_MODEL_MAP[provider].type == mapped_server_type)
+    # retrieve all servers from server type specific table
+    servers = model.query.all()
+
     return [get_formatted_dict(server) for server in servers]
 
 
 def get_provider_servers_types(provider):
-    if PROVIDER_SERVERS_MODEL_MAP.get(provider) != None:
-        servers = PROVIDER_SERVERS_MODEL_MAP[provider].query.distinct(
-            PROVIDER_SERVERS_MODEL_MAP[provider].type)
-        return [{'name': server.type.value} for server in servers]
-    else:
+    servers_models = PROVIDER_SERVERS_MODEL_MAP.get(provider)
+    if servers_models is None:
         # NOTE(gyee): currently we don't have DB tables for both Alibaba and
         # Oracle servers. In order to maintain compatibility with the
         # existing Pint server, we are returning the original server
@@ -199,29 +228,41 @@ def get_provider_servers_types(provider):
         # then we can easily add them to PROVIDER_SERVERS_MODEL_MAP.
         return [{'name': 'smt'}, {'name': 'regionserver'}]
 
+    return [{'name': server.value} for server in servers_models.keys()]
+
 
 def get_provider_regions(provider):
     if provider == 'microsoft':
         return _get_all_azure_regions()
 
-    servers = []
-    images = []
-    region_list = [] # Combination list
-    if PROVIDER_SERVERS_MODEL_MAP.get(provider) != None:
-        servers = PROVIDER_SERVERS_MODEL_MAP[provider].query.with_entities(
-            PROVIDER_SERVERS_MODEL_MAP[provider].region).distinct(
-                PROVIDER_SERVERS_MODEL_MAP[provider].region)
-    if hasattr(PROVIDER_IMAGES_MODEL_MAP[provider], 'region'):
-        images = PROVIDER_IMAGES_MODEL_MAP[provider].query.with_entities(
-            PROVIDER_IMAGES_MODEL_MAP[provider].region).distinct(
-                PROVIDER_IMAGES_MODEL_MAP[provider].region)
-    for server in servers:
-        if server.region not in region_list:
-            region_list.append(server.region)
-    for image in images:
-        if image.region not in region_list:
-            region_list.append(image.region)
-    return [{'name': r } for r in region_list]
+    models = [
+        PROVIDER_SERVERS_MODEL_MAP.get(provider, {}).get(ServerType.region),
+        PROVIDER_IMAGES_MODEL_MAP[provider]
+    ]
+
+    # use a set to track found regions
+    found_regions = set()
+
+    # iterate over the possible models that may contain regions
+    for model in models:
+
+        # skip servers entry if no servers model was found
+        if not model:
+            continue
+
+        # skip images entry if images model doesn't have a region field
+        if not hasattr(model, 'region'):
+            continue
+
+        # query the distinct list of regions in the model
+        model_regions = model.query.with_entities(model.region).distinct(
+                                                            model.region)
+
+        # generate a set comprehension of the distinct model regions
+        # and update found_regions to include it
+        found_regions.update({r.region for r in model_regions})
+
+    return [{'name': r} for r in found_regions]
 
 
 def _get_all_azure_regions():
@@ -258,12 +299,16 @@ def _get_azure_servers(region, server_type=None):
     if server_type:
         mapped_server_type = get_mapped_server_type_for_provider(
             'microsoft', server_type)
-        servers = MicrosoftServersModel.query.filter(
-            MicrosoftServersModel.type == mapped_server_type,
-            MicrosoftServersModel.region.in_(all_regions))
+        model = PROVIDER_SERVERS_MODEL_MAP['microsoft'][mapped_server_type]
+        servers = model.query.filter(
+            model.type == mapped_server_type,
+            model.region.in_(all_regions))
     else:
-        servers = MicrosoftServersModel.query.filter(
-            MicrosoftServersModel.region.in_(all_regions))
+        # NOTE(fmccarthy): This may be a memory hog as we are expanding
+        # the query results here
+        servers = []
+        for model in PROVIDER_SERVERS_MODEL_MAP['microsoft'].values():
+            servers.extend(model.query.filter(model.region.in_(all_regions)))
 
     try:
         return [
@@ -342,9 +387,10 @@ def get_provider_servers_for_region(provider, region):
     for each in get_provider_regions(provider):
         region_names.append(each['name'])
     if region in region_names:
-        if PROVIDER_SERVERS_MODEL_MAP.get(provider) != None:
-            servers = PROVIDER_SERVERS_MODEL_MAP[provider].query.filter(
-                PROVIDER_SERVERS_MODEL_MAP[provider].region == region)
+        # NOTE(fmccarthy): This may be a memory hog as we are expanding
+        # the query results here
+        for model in PROVIDER_SERVERS_MODEL_MAP.get(provider, {}).values():
+            servers.extend(model.query.filter(model.region == region))
     else:
         abort(Response('', status=404))
 
@@ -367,9 +413,8 @@ def get_provider_servers_for_region_and_type(provider, region, server_type):
     for each in get_provider_regions(provider):
         region_names.append(each['name'])
     if region in region_names:
-        servers = PROVIDER_SERVERS_MODEL_MAP[provider].query.filter(
-            PROVIDER_SERVERS_MODEL_MAP[provider].region == region,
-            PROVIDER_SERVERS_MODEL_MAP[provider].type == mapped_server_type)
+        model = PROVIDER_SERVERS_MODEL_MAP[provider][mapped_server_type]
+        servers = model.query.filter(model.region == region)
         return [get_formatted_dict(server) for server in servers]
     else:
         abort(Response('', status=404))
@@ -392,9 +437,11 @@ def get_provider_images_for_region(provider, region):
 
 
 def get_provider_servers(provider):
+    # NOTE(fmccarthy): This may be a memory hog as we are expanding
+    # the query results here
     servers = []
-    if PROVIDER_SERVERS_MODEL_MAP.get(provider) != None:
-        servers = PROVIDER_SERVERS_MODEL_MAP[provider].query.all()
+    for model in PROVIDER_SERVERS_MODEL_MAP.get(provider, {}).values():
+        servers.extend(model.query.all())
     return [get_formatted_dict(server) for server in servers]
 
 
@@ -404,13 +451,24 @@ def get_provider_images(provider):
 
 
 def get_data_version_for_provider_category(provider, category):
-    tablename = provider + category
+    tables = []
+    # for images we just have one table to check
+    if category == "images":
+        tables.append(f"{provider}{category}")
+    # for servers we have two tables to check
+    if category == "servers":
+        for server_type in REGIONSERVER_SMT_REVERSED_MAP.keys():
+            tables.append(f"{provider}{server_type}{category}")
+
     try:
-        version = VersionsModel.query.filter(
-            VersionsModel.tablename == tablename).one()
-    except (NoResultFound, MultipleResultsFound):
-        # NOTE(gyee): we should never run into MultipleResultsFound exception
-        # or otherse we have data corruption problem in the database.
+        # find versions for the specified set of tables, sort them
+        # them in descending order, and return the first found,
+        # failing with NoResultFound if no tables matched.
+        version = VersionsModel.query.with_entities(
+            VersionsModel.version).filter(
+            VersionsModel.tablename.in_(tables)).order_by(
+            VersionsModel.version.desc()).limit(1).one()
+    except NoResultFound:
         abort(Response('', status=404))
 
     return {'version': str(version.version)}
