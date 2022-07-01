@@ -138,7 +138,7 @@ def fix(ctx, dryrun, fixes):
     }
 
     if fixes:
-        fix_list = [t.strip() for f in fixes.split()]
+        fix_list = [f.strip() for f in fixes.split()]
         unknown_fixes = set(known_fixes.keys()).difference(set(fix_list))
         if unknown_fixes:
             LOG.error("Invalid fixes: %s", ", ".join(list(unknown_fixes)))
